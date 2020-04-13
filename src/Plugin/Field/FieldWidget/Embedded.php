@@ -147,6 +147,20 @@ class Embedded extends WidgetBase implements ContainerFactoryPluginInterface {
       return $form;
     }
 
+    $field_state = static::getWidgetState($form['#parents'], $this->fieldDefinition->getName(), $form_state);
+
+    if (isset($field_state['item_removed'])) {
+      $delta = $field_state['item_removed'];
+
+      if ($items->get($delta)) {
+        $items->removeItem($delta);
+      }
+
+      $field_state['item_removed'] = NULL;
+
+      static::setWidgetState($form['#parents'], $this->fieldDefinition->getName(), $form_state, $field_state);
+    }
+
     return parent::form($items, $form, $form_state, $get_delta);
   }
 
@@ -154,6 +168,9 @@ class Embedded extends WidgetBase implements ContainerFactoryPluginInterface {
    * {@inheritdoc}
    */
   public function formElement(FieldItemListInterface $items, $delta, array $element, array &$form, FormStateInterface $form_state) {
+    $parents = $form['#parents'];
+    $field_name = $items->getName();
+
     $item = $items->get($delta);
     $entity = $item->entity ?: $this->createEntity($items->getEntity());
     $inline_form = $this->inlineFormManager->createInstance('content_entity', [
@@ -172,18 +189,83 @@ class Embedded extends WidgetBase implements ContainerFactoryPluginInterface {
     ] + $element;
 
     $element['entity'] = [
-      '#parents' => array_merge($element['#field_parents'], [$items->getName(), $delta, 'entity']),
+      '#parents' => array_merge($element['#field_parents'], [$field_name, $delta, 'entity']),
       '#inline_form' => $inline_form,
     ];
     $element['entity'] = $inline_form->buildInlineForm($element['entity'], $form_state);
 
+    $id_suffix = $parents ? '-' . implode('-', $parents) : '';
+    $wrapper_id = $field_name . '-ief-wrapper' . $id_suffix;
+
+    $element['remove_button'] = [
+      '#type' => 'submit',
+      '#name' => $field_name . '-' . $delta . '-ief-remove-button',
+      '#value' => $this->t('Remove'),
+      '#delta' => $delta,
+      '#ajax' => [
+        'callback' => [static::class, 'updateWidget'],
+        'wrapper' => $wrapper_id,
+      ],
+      '#submit' => [[static::class, 'removeItem']],
+      '#limit_validation_errors' => [],
+    ];
+
     return $element;
+  }
+
+  public static function updateWidget(array $form, FormStateInterface $form_state) {
+    $button = $form_state->getTriggeringElement();
+
+    $element = NestedArray::getValue($form, array_slice($button['#array_parents'], 0, -2));
+
+    return $element;
+  }
+
+  public static function removeItem(array $form, FormStateInterface $form_state) {
+    $button = $form_state->getTriggeringElement();
+
+    $delta = $button['#delta'];
+
+    $element = NestedArray::getValue($form, array_slice($button['#array_parents'], 0, -2));
+    $field_name = $element['#field_name'];
+    $field_parents = $element['#field_parents'];
+
+    $parents = $element['#parents'];
+
+    // 1. Modify the form state.
+
+    $values = NestedArray::getValue($form_state->getValues(), $parents);
+    $input = NestedArray::getValue($form_state->getUserInput(), $parents);
+
+    if (isset($input[$delta])) {
+      unset($input[$delta]);
+      $input = array_values($input);
+
+      NestedArray::setValue($form_state->getUserInput(), $parents, $input);
+    }
+
+    if (isset($values[$delta])) {
+      unset($values[$delta]);
+      $values = array_values($values);
+
+      NestedArray::setValue($form_state->getValues(), $parents, $values);
+    }
+
+    $field_state = static::getWidgetState($field_parents, $field_name, $form_state);
+    $field_state['items_count']--;
+    $field_state['item_removed'] = $delta;
+    static::setWidgetState($field_parents, $field_name, $form_state, $field_state);
+
+    $form_state->setRebuild();
   }
 
   /**
    * {@inheritdoc}
    */
   protected function formMultipleElements(FieldItemListInterface $items, array &$form, FormStateInterface $form_state) {
+    $parents = $form['#parents'];
+    $field_name = $this->fieldDefinition->getName();
+
     $element = parent::formMultipleElements($items, $form, $form_state);
 
     // By default, Drupal core shows an empty item when the field is unlimited.
@@ -201,6 +283,12 @@ class Embedded extends WidgetBase implements ContainerFactoryPluginInterface {
       $field_state['items_count']--;
       static::setWidgetState($parents, $field_name, $form_state, $field_state);
     }
+
+    $id_suffix = $parents ? '-' . implode('-', $parents) : '';
+    $wrapper_id = $field_name . '-ief-wrapper' . $id_suffix;
+
+    $element['#prefix'] = "<div id=\"$wrapper_id\">";
+    $element['add_more']['#ajax']['wrapper'] = $wrapper_id;
 
     return $element;
   }
@@ -268,6 +356,9 @@ class Embedded extends WidgetBase implements ContainerFactoryPluginInterface {
    *
    * @return \Drupal\Core\Entity\EntityInterface
    *   The created entity.
+   *
+   * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
+   * @throws \Drupal\Component\Plugin\Exception\PluginNotFoundException
    */
   protected function createEntity(EntityInterface $parent_entity) {
     $target_entity_type_id = $this->getFieldSetting('target_type');
